@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"strings"
 
 	"github.com/abelgalef/go-viso/pkg/models"
 	"github.com/go-sql-driver/mysql"
@@ -14,6 +15,8 @@ type Service interface {
 	Close() error
 	GenerateTableSchema() error
 	GetTables() []*models.Table
+	GetRows(t *models.Table, constraints models.Constraints) ([]map[string]interface{}, error)
+	InsertRows(t *models.Table, m []map[string]interface{}) ([]map[string]interface{}, error)
 }
 
 type DBconfig struct {
@@ -110,4 +113,85 @@ func (d *dbService) setTableDiscriptors(tables *models.Table) error {
 
 func (d *dbService) GetTables() []*models.Table {
 	return d.Tables
+}
+
+func (d *dbService) GetRows(t *models.Table, constraints models.Constraints) ([]map[string]interface{}, error) {
+	query := fmt.Sprintf("SELECT * FROM %s", t.Name)
+	if constraints.Field != "" && constraints.OperatorValue != "" {
+		query += fmt.Sprintf(" WHERE %s %s %v", constraints.Field, constraints.OperatorValue, constraints.Value)
+	}
+
+	if constraints.Limit != 0 && constraints.Offset != 0 {
+		query += fmt.Sprintf(" LIMIT %d OFFSET %d", constraints.Limit, constraints.Offset)
+	}
+
+	if constraints.Sort != "" {
+		query += fmt.Sprintf(" ORDER BY %s", constraints.Sort)
+	}
+
+	fmt.Println(query)
+
+	rows, err := d.DB.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	cols, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+
+	var vals []map[string]interface{}
+	for rows.Next() {
+		// Create a slice of interface{}'s to represent each column,
+		// and a second slice to contain pointers to each item in the columns slice.
+		columns := make([]interface{}, len(cols))
+		columnPointers := make([]interface{}, len(cols))
+
+		for i, _ := range columns {
+			columnPointers[i] = &columns[i]
+		}
+
+		// Scan the result into the column pointers...
+		if err := rows.Scan(columnPointers...); err != nil {
+			return nil, err
+		}
+
+		// Create our map, and retrieve the value for each column from the pointers slice,
+		// storing it in the map with the name of the column as the key.
+		m := make(map[string]interface{})
+		for i, colName := range cols {
+			val := columnPointers[i].(*interface{})
+			m[colName] = *val
+		}
+		vals = append(vals, m)
+	}
+
+	return vals, nil
+}
+
+func (d *dbService) InsertRows(t *models.Table, m []map[string]interface{}) ([]map[string]interface{}, error) {
+	for i, r := range m {
+		q1 := "INSERT INTO " + t.Name + " ("
+		q2 := "VALUES ("
+
+		for k, v := range r {
+			q1 += fmt.Sprintf("`%s`, ", k)
+			q2 += fmt.Sprintf("'%s', ", v)
+		}
+		query := strings.TrimRight(q1, ", ") + ") " + strings.TrimRight(q2, ", ") + ")"
+
+		res, err := d.DB.Exec(query)
+		if err != nil {
+			return nil, err
+		}
+
+		id, err := res.LastInsertId()
+		if err != nil {
+			return nil, err
+		}
+
+		m[i]["id"] = id
+	}
+
+	return m, nil
 }
